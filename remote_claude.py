@@ -463,14 +463,9 @@ def cmd_stats(args):
         sys.path.insert(0, _PROJECT_ROOT)
 
     from stats.query import query_summary, reset_stats
-    from stats import report_daily
 
     if getattr(args, 'reset', False):
         print(reset_stats())
-        return 0
-
-    if getattr(args, 'report', False):
-        report_daily()
         return 0
 
     range_str = getattr(args, 'range', 'today') or 'today'
@@ -872,10 +867,6 @@ def main():
     stats_parser.add_argument(
         "--reset", action="store_true",
         help="清空所有统计数据"
-    )
-    stats_parser.add_argument(
-        "--report", action="store_true",
-        help="立即触发 Mixpanel 聚合上报"
     )
     stats_parser.set_defaults(func=cmd_stats)
 

@@ -3,7 +3,7 @@ StatsCollector：事件收集器
 
 - 内存队列（deque）接收 track() 调用（O(1)，无 I/O）
 - 每 10 秒或满 50 条时批量写入 SQLite（WAL 模式）
-- 每日聚合上报 Mixpanel（~22 条/天）
+- 本地留存，不上传任何数据到外部服务
 - 所有异常均被捕获，绝不影响主流程
 """
 
@@ -45,34 +45,25 @@ _SUMMARY_RETENTION = 365 # 天
 
 
 class StatsCollector:
-    """事件收集器：内存队列 + SQLite 批量写入 + 定时 Mixpanel 聚合上报"""
+    """事件收集器：内存队列 + SQLite 批量写入"""
 
-    def __init__(self, enabled: bool = True):
-        self._enabled = enabled
+    def __init__(self):
         self._queue: deque = deque(maxlen=10000)
         self._lock = threading.Lock()
         self._machine_id = get_machine_id()
         self._conn: Optional[sqlite3.Connection] = None
-        self._mp = None              # Mixpanel 实例，延迟初始化
-        self._mp_token: str = ""
         self._last_flush = 0.0
-        self._last_report_date: str = ""
-        self._is_first_run = False   # 是否首次运行（需上报 install 事件）
 
-        if self._enabled:
-            self._init_db()
-            self._check_first_run()
-            # 后台线程定时 flush
-            t = threading.Thread(target=self._flush_loop, daemon=True)
-            t.start()
+        self._init_db()
+        # 后台线程定时 flush
+        t = threading.Thread(target=self._flush_loop, daemon=True)
+        t.start()
 
     # ── 公开接口 ──────────────────────────────────────────────────────────────
 
     def track(self, category: str, event: str, session_name: str = '',
-              chat_id: str = '', value: int = 1, detail: str = '') -> None:
+               chat_id: str = '', value: int = 1, detail: str = '') -> None:
         """记录事件到本地（非阻塞，线程安全）"""
-        if not self._enabled:
-            return
         try:
             now = time.time()
             date = time.strftime('%Y-%m-%d', time.localtime(now))
@@ -88,91 +79,12 @@ class StatsCollector:
         except Exception:
             pass
 
-    def set_mixpanel_token(self, token: str) -> None:
-        """配置 Mixpanel token（来自 .env）"""
-        if not token:
-            return
-        self._mp_token = token
-        try:
-            import mixpanel
-            self._mp = mixpanel.Mixpanel(token)
-        except ImportError:
-            pass  # mixpanel 未安装时静默跳过
-
-    def check_and_report(self) -> None:
-        """检查是否需要上报昨日数据（跨天检测，可在后台调用）"""
-        if not self._enabled or not self._mp:
-            return
-        try:
-            today = time.strftime('%Y-%m-%d')
-            if self._last_report_date == today:
-                return
-            yesterday = time.strftime('%Y-%m-%d',
-                                      time.localtime(time.time() - 86400))
-            self.report_daily(yesterday)
-            self._last_report_date = today
-        except Exception:
-            pass
-
-    def report_daily(self, date: Optional[str] = None) -> None:
-        """聚合指定日期数据并上报 Mixpanel（默认昨天）"""
-        if not self._enabled or not self._mp:
-            return
-        try:
-            if date is None:
-                date = time.strftime('%Y-%m-%d',
-                                     time.localtime(time.time() - 86400))
-            self._flush()  # 先把队列里的数据落库
-
-            conn = self._get_conn()
-            rows = conn.execute(
-                "SELECT category, event, COUNT(*), SUM(value) "
-                "FROM events WHERE date=? GROUP BY category, event",
-                (date,)
-            ).fetchall()
-
-            if not rows:
-                return
-
-            machine_info = get_machine_info()
-            for category, event, count, total_value in rows:
-                self._mp_track('daily_summary', {
-                    'category': category,
-                    'event': event,
-                    'count': count,
-                    'total_value': total_value,
-                    'date': date,
-                    **machine_info,
-                })
-
-            # 上报 heartbeat
-            active_sessions = self._count_active_sessions(date, conn)
-            self._mp_track('heartbeat', {
-                'date': date,
-                'active_sessions': active_sessions,
-                **machine_info,
-            })
-
-            # 写入 daily_summary 表（本地留存）
-            for category, event, count, total_value in rows:
-                conn.execute(
-                    "INSERT OR REPLACE INTO daily_summary "
-                    "(date, category, event, count, total_value) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (date, category, event, count, total_value)
-                )
-            conn.commit()
-
-        except Exception:
-            pass
-
     def close(self) -> None:
         """关闭前刷新队列"""
-        if self._enabled:
-            try:
-                self._flush()
-            except Exception:
-                pass
+        try:
+            self._flush()
+        except Exception:
+            pass
 
     # ── 内部方法 ──────────────────────────────────────────────────────────────
 
@@ -223,23 +135,6 @@ class StatsCollector:
         except Exception:
             pass
 
-    def _check_first_run(self) -> None:
-        """检查是否首次运行"""
-        try:
-            conn = self._get_conn()
-            row = conn.execute(
-                "SELECT value FROM meta WHERE key='first_run'"
-            ).fetchone()
-            if row is None:
-                self._is_first_run = True
-                conn.execute(
-                    "INSERT INTO meta (key, value) VALUES ('first_run', ?)",
-                    (time.strftime('%Y-%m-%d'),)
-                )
-                conn.commit()
-        except Exception:
-            pass
-
     def _get_conn(self) -> sqlite3.Connection:
         """获取 SQLite 连接（线程本地）"""
         if self._conn is None:
@@ -281,7 +176,6 @@ class StatsCollector:
                     has_data = bool(self._queue)
                 if has_data and elapsed >= _FLUSH_INTERVAL:
                     self._flush()
-                self.check_and_report()
             except Exception:
                 pass
 
@@ -299,74 +193,3 @@ class StatsCollector:
             conn.commit()
         except Exception:
             pass
-
-    def _mp_track(self, event_name: str, properties: dict) -> None:
-        """上报单条 Mixpanel 事件"""
-        if not self._mp:
-            return
-        try:
-            self._mp.track(self._machine_id, event_name, properties)
-        except Exception:
-            pass
-
-    def _count_active_sessions(self, date: str,
-                               conn: sqlite3.Connection) -> int:
-        """统计指定日期有 start 事件的会话数"""
-        try:
-            row = conn.execute(
-                "SELECT COUNT(DISTINCT session_name) FROM events "
-                "WHERE date=? AND category='session' AND event='start'",
-                (date,)
-            ).fetchone()
-            return row[0] if row else 0
-        except Exception:
-            return 0
-
-    def report_install(self) -> None:
-        """首次运行时上报 install 事件和 user profile"""
-        if not self._is_first_run or not self._mp_token:
-            return
-
-        machine_info = get_machine_info()
-        machine_id = self._machine_id
-        mp_token = self._mp_token
-        mp = self._mp  # 可能为 None（mixpanel 包未安装时）
-
-        def _send() -> None:
-            try:
-                import base64
-                import json
-                import urllib.request
-
-                props = {**machine_info, 'token': mp_token, 'distinct_id': machine_id}
-                data = base64.b64encode(json.dumps([{
-                    'event': 'install',
-                    'properties': props,
-                }]).encode()).decode()
-                req = urllib.request.Request(
-                    'https://api.mixpanel.com/track',
-                    data=f'data={data}'.encode(),
-                    method='POST',
-                )
-                urllib.request.urlopen(req, timeout=10)
-                logger.debug('install event sent via urllib (machine_id=%s)', machine_id)
-            except Exception as e:
-                logger.warning('install event failed: %s', e)
-
-            # 同时更新 user profile（仅 SDK 可用时）
-            if mp:
-                try:
-                    import datetime
-                    mp.people_set(machine_id, {
-                        '$name': machine_info['hostname'],
-                        **machine_info,
-                        'first_seen': datetime.datetime.now().isoformat(),
-                    })
-                    logger.debug('people_set sent via mixpanel SDK')
-                except Exception as e:
-                    logger.warning('people_set failed: %s', e)
-            else:
-                logger.debug('mixpanel SDK not available, skipping people_set')
-
-        t = threading.Thread(target=_send, daemon=True)
-        t.start()

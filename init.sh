@@ -339,8 +339,6 @@ install_dependencies() {
 
     print_success "依赖安装完成"
 
-    # 上报 init_install 事件（后台执行，不阻塞，失败静默）
-    python3 scripts/report_install.py &>/dev/null &
 }
 
 # 配置飞书环境
