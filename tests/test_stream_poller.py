@@ -398,6 +398,19 @@ class TestExtractButtons(unittest.TestCase):
 class TestBuildStreamCard(unittest.TestCase):
     """测试完整卡片构建"""
 
+    def _count_markdown_recursive(self, elements):
+        """递归统计所有 markdown 元素（UserInput 被包在 column_set 里）"""
+        count = 0
+        for e in elements:
+            if e.get("tag") == "markdown":
+                count += 1
+            elif e.get("tag") == "column_set":
+                for col in e.get("columns", []):
+                    count += self._count_markdown_recursive(col.get("elements", []))
+            elif e.get("tag") == "column":
+                count += self._count_markdown_recursive(e.get("elements", []))
+        return count
+
     def test_basic_output(self):
         blocks = [
             {"_type": "UserInput", "text": "你好"},
@@ -408,8 +421,9 @@ class TestBuildStreamCard(unittest.TestCase):
         self.assertEqual(card["header"]["template"], "green")
         elements = card["body"]["elements"]
         # 至少有 2 个 markdown（blocks）+ hr + menu
-        md_elements = [e for e in elements if e.get("tag") == "markdown"]
-        self.assertGreaterEqual(len(md_elements), 2)
+        # UserInput 被包在 column_set 里，需要递归统计
+        md_count = self._count_markdown_recursive(elements)
+        self.assertGreaterEqual(md_count, 2)
 
     def test_frozen_card(self):
         blocks = [{"_type": "OutputBlock", "content": "历史内容", "indicator": "●"}]
@@ -531,14 +545,18 @@ class TestBuildStreamCard(unittest.TestCase):
         card = build_stream_card(blocks, status_line=status)
         elements = card["body"]["elements"]
 
-        # 第一层：内容区（至少 2 个 markdown block，不含代码块）
-        content_mds = []
+        # 第一层：内容区（UserInput 在 blue column_set 里，OutputBlock 是 markdown）
+        # 统计蓝色 column_set 里的 markdown + 顶层的 markdown
+        content_md_count = 0
         for e in elements:
             if e.get("tag") == "markdown":
-                content_mds.append(e)
+                content_md_count += 1
+            elif e.get("tag") == "column_set" and e.get("background_style") == "blue":
+                # UserInput 在蓝色 column_set 里
+                content_md_count += 1
             elif e.get("tag") == "column_set" and e.get("background_style") == "grey":
                 break  # 到达状态区
-        self.assertGreaterEqual(len(content_mds), 2)  # UserInput + OutputBlock
+        self.assertGreaterEqual(content_md_count, 2)  # UserInput + OutputBlock
 
         # 第二层：状态区（column_set grey 背景内含状态文本）
         grey_sets = [e for e in elements if e.get("tag") == "column_set" and e.get("background_style") == "grey"]
@@ -732,16 +750,21 @@ class TestBuildStreamCard(unittest.TestCase):
         ]
         self.assertEqual(len(plan_panels), 1)
         # 应有至少 2 个 markdown（UserInput + OutputBlock）
-        md_elements = [e for e in elements if e.get("tag") == "markdown"]
-        self.assertGreaterEqual(len(md_elements), 2)
+        # UserInput 被包在 column_set 里，需要递归统计
+        md_count = self._count_markdown_recursive(elements)
+        self.assertGreaterEqual(md_count, 2)
         # UserInput 应在 PlanBlock 之前（在 elements 列表中位置更靠前）
-        md_pos = next(i for i, e in enumerate(elements) if e.get("tag") == "markdown")
+        # 现在 UserInput 在 column_set 里，找第一个 column_set（背景色蓝色）的位置
+        user_input_pos = next(
+            i for i, e in enumerate(elements)
+            if e.get("tag") == "column_set" and e.get("background_style") == "blue"
+        )
         panel_pos = next(
             i for i, e in enumerate(elements)
             if e.get("tag") == "collapsible_panel"
             and "📋" in e.get("header", {}).get("title", {}).get("content", "")
         )
-        self.assertLess(md_pos, panel_pos)
+        self.assertLess(user_input_pos, panel_pos)
 
 
 class TestRenderAgentPanel(unittest.TestCase):

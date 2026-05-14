@@ -677,7 +677,29 @@ def build_stream_card(
         rendered = _render_block_colored(block_dict)
         if rendered:
             has_content = True
-            elements.append({"tag": "markdown", "content": rendered})
+            if typ == "UserInput":
+                # 用户输入：蓝色背景 + 白色文字，对比清晰
+                text = block_dict.get("text", "")
+                if text:
+                    ind = block_dict.get("ansi_indicator", "")
+                    ind_mark = _ansi_to_lark_md(ind) if ind else "❯"
+                    # indicator 保留 ANSI 颜色，文字部分用白色
+                    content = f"{ind_mark} <font color=\"white\">{_escape_md(text)}</font>"
+                else:
+                    content = rendered
+                elements.append({
+                    "tag": "column_set",
+                    "flex_mode": "none",
+                    "background_style": "blue",
+                    "columns": [{
+                        "tag": "column",
+                        "width": "weighted",
+                        "weight": 1,
+                        "elements": [{"tag": "markdown", "content": content}],
+                    }],
+                })
+            else:
+                elements.append({"tag": "markdown", "content": rendered})
 
 
     # === 第二层：状态区（仅非冻结且非断开时，column_set 灰色背景）===
